@@ -11,6 +11,6 @@ videos just go away. This is a mechanism for resisting that.
 
 ## How
 
-python3 riptube.py <username>
+python3 riptube.py &lt;username&gt;
 
 Other options are likely to come.
