@@ -738,11 +738,11 @@ def download_videos_for_user(username, output_directory):
                 break
             except HTTPError as err:
                 # This hack sucks, but I can't figure out how to stop
-                # the 403s from happening randomly.
-                if err.code != 403:
+                # the request errors from happening randomly.
+                if err.code != 403 and err.code != 400:
                     raise err
 
-                sys.stderr.write("We got a 403, sleep a little...\n")
+                sys.stderr.write("We got request error, sleep a little...\n")
                 time.sleep(3)
 
 if __name__ == "__main__":
