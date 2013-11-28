@@ -742,7 +742,7 @@ def download_videos_for_user(username, output_directory):
                 if err.code != 403 and err.code != 400:
                     raise err
 
-                sys.stderr.write("We got request error, sleep a little...\n")
+                sys.stderr.write("We got a request error, sleep a little...\n")
                 time.sleep(3)
 
 if __name__ == "__main__":
