@@ -48,6 +48,7 @@ import re
 import json
 import datetime
 import time
+import socket
 
 from urllib.parse import urlencode, parse_qs
 from urllib.request import Request, urlopen
@@ -548,12 +549,15 @@ ITAG_MAP = {
 }
 
 def browser_spoof_open(url):
-    return urlopen(Request(url, headers={
-        "User-agent": (
-            "Mozilla/5.0 (X11; Linux x86_64; rv:25.0) "
-            "Gecko/20100101 Firefox/25.0"
-        ),
-    }))
+    return urlopen(
+        Request(url, headers={
+            "User-agent": (
+                "Mozilla/5.0 (X11; Linux x86_64; rv:25.0) "
+                "Gecko/20100101 Firefox/25.0"
+            ),
+        }),
+        timeout= 1
+    )
 
 def create_feed_url(username, page_index):
     """
@@ -736,10 +740,12 @@ def download_videos_for_user(username, output_directory):
             try:
                 download_feed_item(feed_item, user_directory)
                 break
-            except HTTPError as err:
+            except (socket.timeout, HTTPError) as err:
                 # This hack sucks, but I can't figure out how to stop
                 # the request errors from happening randomly.
-                if err.code != 403 and err.code != 400:
+                if not isinstance(err, socket.timeout) \
+                and err.code != 403 \
+                and err.code != 400:
                     raise err
 
                 sys.stderr.write("We got a request error, sleep a little...\n")
