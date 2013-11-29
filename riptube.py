@@ -745,7 +745,8 @@ def download_videos_for_user(username, output_directory):
                 # the request errors from happening randomly.
                 if not isinstance(err, socket.timeout) \
                 and err.code != 403 \
-                and err.code != 400:
+                and err.code != 400 \
+                and err.code != 503:
                     raise err
 
                 sys.stderr.write("We got a request error, sleep a little...\n")
