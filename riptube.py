@@ -700,6 +700,12 @@ def base_filename_for_feed_item(feed_item):
     )
 
 def download_feed_item(feed_item, base_directory):
+    """
+    Download a feed item into a directory.
+
+    Return a pair (video_filename, json_filename) if the item is downloaded,
+    otherwise return None if the video has already been downloaded.
+    """
     join_path = partial(os.path.join, base_directory)
 
     base_filename = base_filename_for_feed_item(feed_item)
@@ -729,16 +735,25 @@ def download_feed_item(feed_item, base_directory):
             "feed_item": feed_item.to_json(),
         }, out_file)
 
-def download_videos_for_user(username, output_directory):
+    return (video_filename, json_filename)
+
+def download_videos_for_user(username, output_directory, log_file= None):
+    def log(format_string, *args):
+        if log_file is not None:
+            log_file.write(format_string.format(*args))
+            log_file.write("\n")
+
     user_directory = os.path.join(output_directory, username)
 
     if not os.path.exists(user_directory):
         os.mkdir(user_directory)
 
+    log("Downloading videos for username: {}", username)
+
     for feed_item in user_videos(username):
         while True:
             try:
-                download_feed_item(feed_item, user_directory)
+                feed_result = download_feed_item(feed_item, user_directory)
                 break
             except (socket.timeout, HTTPError) as err:
                 # This hack sucks, but I can't figure out how to stop
@@ -749,17 +764,23 @@ def download_videos_for_user(username, output_directory):
                 and err.code != 503:
                     raise err
 
-                sys.stderr.write("We got a request error, sleep a little...\n")
+                log("Got a request error, sleeping a little...")
                 time.sleep(3)
+
+        if feed_result is not None:
+            log("Grabbed item {} - {}", feed_item.video_id, feed_item.title)
+            log("filename: {}", feed_result[0])
+            log("JSON filename: {}", feed_result[1])
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("Usage: riptube.py <username>")
+        sys.exit("Usage: riptube.py <username> [<output_directory>]")
 
     username = sys.argv[1]
-    output_dir = "output"
+    output_dir = sys.argv[2] if len(sys.argv) >= 3 else "output"
 
     if not os.path.exists(output_dir):
         os.mkdir(output_dir)
 
-    download_videos_for_user(username, output_dir)
+    download_videos_for_user(username, output_dir, log_file= sys.stderr)
+
