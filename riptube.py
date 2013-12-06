@@ -50,9 +50,29 @@ import datetime
 import time
 import socket
 
-from urllib.parse import urlencode, parse_qs
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+PYTHON_2 = sys.version_info[0] == 2
+
+if PYTHON_2:
+    # Python 2 has a different module structure for network functions.
+    from urllib import urlencode
+    from urlparse import parse_qs
+    from urllib2 import Request
+    from urllib2 import HTTPError
+
+    import contextlib
+    import urllib2
+
+    urlopen = lambda *args, **kwargs: contextlib.closing(
+        urllib2.urlopen(*args, **kwargs)
+    )
+
+    compat_str = basestring
+else:
+    from urllib.parse import urlencode, parse_qs
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+
+    compat_str = str
 
 API_URL = "https://gdata.youtube.com/feeds/api"
 INFO_URL = "https://www.youtube.com/get_video_info"
@@ -79,8 +99,8 @@ class FeedItem:
     def __init__(self, video_id, upload_time, title, description):
         assert VIDEO_ID_REGEX.match(video_id)
         assert isinstance(upload_time, datetime.datetime)
-        assert isinstance(title, str)
-        assert isinstance(description, str)
+        assert isinstance(title, compat_str)
+        assert isinstance(description, compat_str)
 
         self.video_id = video_id
         self.upload_time = upload_time
@@ -90,7 +110,7 @@ class FeedItem:
     def to_json(self):
         return {
             "video_id": self.video_id,
-            "upload_time": self.upload_time.timestamp(),
+            "upload_time": to_epoch(self.upload_time),
             "title": self.title,
             "description": self.description,
         }
@@ -103,9 +123,9 @@ class MediaType:
     def __init__(self, itag, file_type, resolution, video_format,
     video_bitrate, audio_format, audio_bitrate):
         assert isinstance(itag, int)
-        assert isinstance(file_type, str)
+        assert isinstance(file_type, compat_str)
 
-        assert video_format is None or isinstance(video_format, str)
+        assert video_format is None or isinstance(video_format, compat_str)
 
         if video_format is not None:
             assert isinstance(resolution, tuple)
@@ -114,7 +134,7 @@ class MediaType:
             assert isinstance(resolution[1], int)
             assert isinstance(video_bitrate, (int, float))
 
-        assert audio_format is None or isinstance(audio_format, str)
+        assert audio_format is None or isinstance(audio_format, compat_str)
 
         if audio_format is not None:
             assert isinstance(audio_bitrate, (int, float))
@@ -548,6 +568,22 @@ ITAG_MAP = {
     )
 }
 
+def to_epoch(datetime_obj):
+    """
+    Convert a datetime object to an epoch value, as returned by time.time().
+
+    This function supports both Python 2 and Python 3.
+    """
+    if PYTHON_2:
+        import calendar
+
+        return (
+            calendar.timegm(datetime_obj.timetuple())
+            + datetime_obj.microsecond / 1000000
+        )
+    else:
+        return datetime_obj.timestamp()
+
 def browser_spoof_open(url):
     return urlopen(
         Request(url, headers={
@@ -683,7 +719,8 @@ def user_videos(username):
             create_feed_url(username, page_index)
         )
 
-        yield from entry_list
+        for entry in entry_list:
+            yield entry
 
         if len(entry_list) < MAX_RESULTS:
             break
@@ -695,7 +732,7 @@ def base_filename_for_feed_item(feed_item):
     This is returned in the format <epoch>_<video_id>
     """
     return "{}_{}".format(
-        int(feed_item.upload_time.timestamp()),
+        int(to_epoch(feed_item.upload_time)),
         feed_item.video_id
     )
 
@@ -783,4 +820,3 @@ if __name__ == "__main__":
         os.mkdir(output_dir)
 
     download_videos_for_user(username, output_dir, log_file= sys.stderr)
-
