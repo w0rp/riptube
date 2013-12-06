@@ -574,7 +574,7 @@ def to_epoch(datetime_obj):
 
     This function supports both Python 2 and Python 3.
     """
-    if PYTHON_2:
+    if sys.version_info[0:2] < (3, 3):
         import calendar
 
         return (
