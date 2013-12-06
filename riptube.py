@@ -780,6 +780,8 @@ def download_videos_for_user(username, output_directory, log_file= None):
             log_file.write(format_string.format(*args))
             log_file.write("\n")
 
+    username = username.lower()
+
     user_directory = os.path.join(output_directory, username)
 
     if not os.path.exists(user_directory):
