@@ -32,15 +32,15 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-The views and conclusions contained in the software and documentation are those
-of the authors and should not be interpreted as representing official policies,
-either expressed or implied, of the FreeBSD Project.
+The youtube-dl authors have released their code as public domain code, but it
+is the author's believe that they nonetheless deserve lots of credit for this
+code also. Without youtube-dl, the author might not have been able to
+understand everything required to make this module work.
 """
 
-from itertools import count, repeat, cycle
+from itertools import count, repeat, cycle, chain
 from functools import partial, reduce
 import operator
-
 import os
 import sys
 import shutil
@@ -49,6 +49,7 @@ import json
 import datetime
 import time
 import socket
+from xml.etree import cElementTree as ElementTree
 
 PYTHON_2 = sys.version_info[0] == 2
 
@@ -236,6 +237,9 @@ class DownloadInfo:
     URLs will expire after a short time.
     """
     def __init__(self, media_type, url):
+        assert isinstance(media_type, MediaType)
+        assert isinstance(url, compat_str)
+
         self.media_type = media_type
         self.url = url
 
@@ -462,7 +466,7 @@ ITAG_MAP = {
             audio_format= "aac",
             audio_bitrate= 128
         ),
-        # 133 to 137 are video only streams.
+        # 133 to 138 are video only streams.
         MediaType(
             itag= 133,
             file_type= "mp4",
@@ -504,6 +508,16 @@ ITAG_MAP = {
             file_type= "mp4",
             resolution= (1920, 1080),
             video_format= "h.264",
+            video_bitrate= 2,
+            audio_format= None,
+            audio_bitrate= None
+        ),
+        MediaType(
+            itag= 138,
+            file_type= "mp4",
+            resolution= (3840, 2160),
+            video_format= "h.264",
+            # FIXME: This bitrate is probably wrong.
             video_bitrate= 2,
             audio_format= None,
             audio_bitrate= None
@@ -651,24 +665,17 @@ def create_info_url(video_id):
         ("video_id", video_id),
     )))
 
-def download_info(info_url):
-    with browser_spoof_open(info_url) as conn:
-        # The video info is a urlencoded string.
-        data = parse_qs(conn.read().decode())
-
-    if "errorcode" in data:
-        raise RuntimeError("Download failed for {} with reason: {}".format(
-            info_url, data.get("reason")
-        ))
-
+def download_options_from_stream_map(video_info):
+    """
+    Yield a sequence of download options from the stream map.
+    """
     # The list of downloads is yet another encoded string.
-    stream_map = parse_qs(data["url_encoded_fmt_stream_map"][0])
+    stream_map = parse_qs(video_info["url_encoded_fmt_stream_map"][0])
 
     # A signature string needs to be added to the download URL.
     # This signature sometimes has ,quality=... after it.
     # This signature is sometimes listed once, other times listed
     # for each entry.
-
     fallback_host = stream_map["fallback_host"][0]
 
     def full_url(base_url, sig):
@@ -676,7 +683,7 @@ def download_info(info_url):
             base_url, sig.split(",")[0], fallback_host
         )
 
-    return tuple(
+    return (
         DownloadInfo(
             # The tag sometimes has ,quality= in it.
             ITAG_MAP[int(itag.split(",")[0])],
@@ -685,6 +692,83 @@ def download_info(info_url):
         for itag, base_url, sig in
         zip(stream_map["itag"], stream_map["url"], cycle(stream_map["sig"]))
     )
+
+M3U_ITAG_RE = re.compile(r"itag/(\d+?)/")
+
+def download_options_from_hlsvp(video_info):
+    """
+    Given some video info, download the available formats through hlsvp.
+    This will be downloaded through an .m3u playlist.
+    """
+    m3u_url = video_info.get("hlsvp")
+
+    if not m3u_url:
+        return
+
+    # Download the m3u playlist.
+    with browser_spoof_open(m3u_url) as conn:
+        playlist = conn.read().decode().split("\n")
+
+    # Get the URLs out of the playlist.
+    url_seq = (line for line in playlist if line and not line.startswith("#"))
+
+    for url in url_seq:
+        yield DownloadInfo(
+            ITAG_MAP[int(M3U_ITAG_RE.search(url).groups()[0])],
+            url
+        )
+
+# The XSD for DASH is here:
+# http://standards.iso.org/ittf/PubliclyAvailableStandards/
+#   MPEG-DASH_schema_files/DASH-MPD.xsd
+#
+# The part of DASH documents we care about flows like so:
+# MPD -> Period -> AdaptationSet -> Representation -> BaseURL
+#
+# Take the id attribute of the Representations, take the text of the BaseURLs.
+
+REPRESENTATION_XPATH = ".//{urn:mpeg:DASH:schema:MPD:2011}Representation"
+BASE_URL_XPATH = "{urn:mpeg:DASH:schema:MPD:2011}BaseURL"
+
+def download_options_from_dash_document(video_info):
+    """
+    Given some video info, download available formats from a DASH
+    document, if one is available.
+    """
+    manifest_url_list = video_info.get("dashmpd")
+
+    if not manifest_url_list:
+        return
+
+    with browser_spoof_open(manifest_url_list[0]) as conn:
+        # Read the XML document from the downloaded data.
+        document = ElementTree.fromstring(conn.read())
+
+    # Search for the Representation elements in the document.
+    for representation in document.findall(REPRESENTATION_XPATH):
+        # Find the BaseURL element in the Representation.
+        url_element = representation.find(BASE_URL_XPATH)
+
+        yield DownloadInfo(
+            ITAG_MAP[int(representation.attrib["id"])],
+            url_element.text
+        )
+
+def download_info(info_url):
+    with browser_spoof_open(info_url) as conn:
+        # The video info is a urlencoded string.
+        video_info = parse_qs(conn.read().decode())
+
+    if "errorcode" in video_info:
+        raise RuntimeError("Download failed for {} with reason: {}".format(
+            info_url, video_info.get("reason")
+        ))
+
+    return tuple(chain(
+        download_options_from_stream_map(video_info),
+        download_options_from_hlsvp(video_info),
+        download_options_from_dash_document(video_info),
+    ))
 
 def download_info_for_feed_item(feed_item):
     return download_info(create_info_url(feed_item.video_id))
@@ -699,8 +783,8 @@ def highest_quality_audio_video(download_options):
         Produce a key for sorting a download option by quality.
         """
         return (
-            FILETYPE_RATING_DICT[option.media_type.file_type],
             product(option.media_type.resolution),
+            FILETYPE_RATING_DICT[option.media_type.file_type],
             option.media_type.video_bitrate
         )
 
