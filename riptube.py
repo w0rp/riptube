@@ -105,7 +105,7 @@ JSON_FORMAT_VERSION = "1.1"
 # A function for computing the product of a sequence.
 product = partial(reduce, operator.mul)
 
-class FeedItem:
+class FeedItem (object):
     """
     This object represents a feed item taken from a video feed.
     """
@@ -128,7 +128,7 @@ class FeedItem:
             "description": self.description,
         }
 
-class MediaType:
+class MediaType (object):
     """
     This object holds information about a media type, including
     bitrate, file type, etc.
@@ -257,7 +257,7 @@ class MediaType:
             "audio_bitrate": self.__audio_bitrate,
         }
 
-class DownloadInfo:
+class DownloadInfo (object):
     """
     This object encapsulates information for a downloadable piece of media.
 
