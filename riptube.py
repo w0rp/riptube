@@ -49,6 +49,10 @@ import json
 import datetime
 import time
 import socket
+import subprocess
+import tempfile
+from queue import Queue
+from threading import Thread
 from xml.etree import cElementTree as ElementTree
 
 PYTHON_2 = sys.version_info[0] == 2
@@ -79,16 +83,24 @@ API_URL = "https://gdata.youtube.com/feeds/api"
 INFO_URL = "https://www.youtube.com/get_video_info"
 MAX_RESULTS = 50
 
-FILETYPE_RATING_DICT = {
+# A higher rating is better.
+# Open formats are rated higher.
+VIDEO_RATING_DICT = {
     "3gp": 1,
     "flv": 2,
     "mp4": 3,
     "webm": 4,
 }
 
+AUDIO_RATING_DICT = {
+    "mp3": 1,
+    "aac": 2,
+    "vorbis": 3,
+}
+
 VIDEO_ID_REGEX = re.compile("^[\w\-]{11}$")
 
-JSON_FORMAT_VERSION = "1.0"
+JSON_FORMAT_VERSION = "1.1"
 
 # A function for computing the product of a sequence.
 product = partial(reduce, operator.mul)
@@ -190,12 +202,27 @@ class MediaType:
         """
         return self.__video_format is not None
 
+
+    @property
+    def video_format(self):
+        """
+        Return the video format for this content, which may be None.
+        """
+        return self.__video_format
+
     @property
     def has_audio(self):
         """
         Return True if this media has audio content.
         """
         return self.__audio_format is not None
+
+    @property
+    def audio_format(self):
+        """
+        Return the audio format for this content, which may be None.
+        """
+        return self.__audio_format
 
     @property
     def video_bitrate(self):
@@ -773,26 +800,67 @@ def download_info(info_url):
 def download_info_for_feed_item(feed_item):
     return download_info(create_info_url(feed_item.video_id))
 
-def highest_quality_audio_video(download_options):
+def highest_quality_content(download_options):
     """
-    Select the highest quality audio_video option from a sequence of
-    downlaod options.
+    Select the highest quality content from a sequence of download options.
+    This can be either a single audio-video option, or a pair of two options
+    each with high quality audio and video as separate downloads.
     """
-    def option_key(option):
+    def video_quality_key(option):
         """
-        Produce a key for sorting a download option by quality.
+        Produce a key for sorting a download option by video quality.
         """
         return (
+            VIDEO_RATING_DICT[option.media_type.file_type],
             product(option.media_type.resolution),
-            FILETYPE_RATING_DICT[option.media_type.file_type],
-            option.media_type.video_bitrate
+            option.media_type.video_bitrate,
         )
 
-    return sorted((
-        option
-        for option in download_options
-        if option.media_type.has_video and option.media_type.has_audio
-    ), key= option_key, reverse= True)[0]
+    def audio_quality_key(option):
+        """
+        Produce a key for sorting a download option by audio quality.
+        """
+        return (
+            AUDIO_RATING_DICT[option.media_type.audio_format],
+            option.media_type.audio_bitrate
+        )
+
+    highest_audio = None
+    highest_video = None
+    highest_audio_video = None
+
+    # Linear search download options for highest quality audio, video
+    # and audio-video content.
+    for option in download_options:
+        if option.media_type.has_video:
+            # This option has video content.
+            if highest_video is None \
+            or video_quality_key(option) > video_quality_key(highest_video):
+                # The video content of this is higher quality.
+                highest_video = option
+
+                if option.media_type.has_audio:
+                    # It also has audio, so it's the highest audio-video.
+                    highest_audio_video = option
+        else:
+            # This is audio only content.
+            if highest_audio is None \
+            or audio_quality_key(option) > audio_quality_key(highest_audio):
+                # The audio content of this is higher quality.
+                highest_audio = option
+
+    # Now compare the split content and the joined content and return
+    # what we believe to be best.
+
+    if highest_audio is None \
+    or video_quality_key(highest_video) \
+     < video_quality_key(highest_audio_video):
+        # Wont don't have split tracks, or the joined one is just better
+        # anyway. Let's use that.
+        return highest_audio_video
+
+    # We have split tracks that are better, so use those.
+    return (highest_video, highest_audio)
 
 def user_videos(username):
     """
@@ -820,6 +888,14 @@ def base_filename_for_feed_item(feed_item):
         feed_item.video_id
     )
 
+def download_to_file(url, filename):
+    """
+    Download an entire file to a given filename.
+    """
+    with browser_spoof_open(url) as download_conn:
+        with open(filename, "wb") as out_file:
+            shutil.copyfileobj(download_conn, out_file, 1024 * 8)
+
 def download_feed_item(feed_item, base_directory):
     """
     Download a feed item into a directory.
@@ -837,22 +913,85 @@ def download_feed_item(feed_item, base_directory):
         # Stop here, we already have this video.
         return
 
-    video_info = highest_quality_audio_video(
+    content = highest_quality_content(
         download_info_for_feed_item(feed_item)
     )
 
+    video_content = (
+        content[0]
+        if isinstance(content, tuple) else
+        content
+    )
+
+    assert video_content.media_type.has_video
+
     video_filename = join_path("{}.{}".format(
-        base_filename, video_info.media_type.file_type
+        base_filename, video_content.media_type.file_type
     ))
 
-    with browser_spoof_open(video_info.url) as video_conn:
-        with open(video_filename, "wb") as out_file:
-            shutil.copyfileobj(video_conn, out_file, 1024 * 8)
+    if os.path.exists(video_filename):
+        # Delete the video file if it's there already.
+        os.remove(video_filename)
 
+    if isinstance(content, tuple):
+        # Download video and audio at the same time.
+        que = Queue()
+        exception_queue = Queue()
+
+        def download_in_queue():
+            try:
+                download_to_file(*que.get())
+            except Exception as ex:
+                exception_queue.put(ex)
+
+                # TODO: It would be nice to be able to terminate the other
+                # thread here.
+
+                if isinstance(ex, (KeyboardInterrupt, SystemExit)):
+                    # Re-raise interrupts so cleanup code works.
+                    raise ex
+            finally:
+                que.task_done()
+
+        temp_video_filename = tempfile.mkstemp(prefix= base_filename)[1]
+        temp_audio_filename = tempfile.mkstemp(prefix= base_filename)[1]
+
+        try:
+            que.put((content[0].url, temp_video_filename))
+            que.put((content[1].url, temp_audio_filename))
+
+            for i in range(2):
+                Thread(target= download_in_queue).start()
+
+            que.join()
+
+            if not exception_queue.empty():
+                raise exception_queue.get()
+
+            # Now use ffmpeg to join the audio and video content together.
+            subprocess.check_call((
+                "ffmpeg",
+                "-i", temp_video_filename,
+                "-i", temp_audio_filename,
+                "-c", "copy", os.path.abspath(video_filename)
+            ))
+        finally:
+            # Clean up temporary files.
+            os.remove(temp_video_filename)
+            os.remove(temp_audio_filename)
+    else:
+        # Download one audio-video file.
+        download_to_file(video_content.url, video_filename)
+
+    # Now write the JSOn file with the metadata.
     with open(json_filename, "w") as out_file:
         json.dump({
             "version": JSON_FORMAT_VERSION,
-            "video_info": video_info.to_json(),
+            "content": (
+                [content[0].to_json(), content[1].to_json()]
+                if isinstance(content, tuple) else
+                [content.to_json()]
+            ),
             "feed_item": feed_item.to_json(),
         }, out_file)
 
@@ -898,6 +1037,16 @@ def download_videos_for_user(username, output_directory, log_file= None):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit("Usage: riptube.py <username> [<output_directory>]")
+
+    try:
+        with open(os.devnull, "wb") as null_out:
+            subprocess.check_call(
+                ("ffmpeg", "-h"),
+                stdout= null_out,
+                stderr= null_out
+            )
+    except:
+        sys.exit("'ffmpeg -h' failed! Please install ffmpeg.")
 
     username = sys.argv[1]
     output_dir = sys.argv[2] if len(sys.argv) >= 3 else "output"
